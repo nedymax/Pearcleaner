@@ -55,6 +55,17 @@ jobs:
           xcodebuild -version
           echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
 
+      - name: Remove Liquid Glass app icon (CI-only)
+        run: |
+          # actool's render agent crashes compiling the Icon Composer .icon on
+          # headless runners (no GPU: "AppleM2ScalerParavirtDriver" not found).
+          # Strip it from the ephemeral checkout only; committed source keeps the
+          # icon so local Xcode builds are unaffected. The build below also clears
+          # ASSETCATALOG_COMPILER_APPICON_NAME so actool doesn't look for it.
+          rm -rf "Pearcleaner/Resources/Glass.icon"
+          sed -i '' '/C770B6E[CD]2E78DF9D005A0ABD/d' Pearcleaner.xcodeproj/project.pbxproj
+          echo "Removed Glass.icon and its 4 project references"
+
       - name: Resolve Swift packages
         run: |
           xcodebuild -resolvePackageDependencies \
@@ -75,7 +86,8 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER=""
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ASSETCATALOG_COMPILER_APPICON_NAME=""
 
       - name: Locate, ad-hoc sign, and package .dmg
         run: |
