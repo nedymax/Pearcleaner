@@ -1,0 +1,118 @@
+name: Build & Release (unsigned)
+
+# Builds Pearcleaner on a GitHub-hosted macOS runner (no local Xcode needed)
+# and publishes a .dmg to this repo's Releases.
+#
+# Trigger either by:
+#   * pushing a tag that starts with "v"  (e.g. git tag v5.4.3-fork1 && git push origin v5.4.3-fork1)
+#   * running it manually from the Actions tab (workflow_dispatch) with a tag input
+#
+# The build is UNSIGNED / ad-hoc signed. On first launch users must right-click the
+# app -> Open, or run:  xattr -dr com.apple.quarantine /Applications/Pearcleaner.app
+# The privileged helper and Finder extension may not work without real Developer ID signing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create (e.g. v5.4.3-fork1)'
+        required: true
+        default: 'v5.4.3-fork1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tag / version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "TAG=$TAG"        >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Select Xcode 26 (needed for the macOS 26 SDK / .glassEffect)
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$XC" ]; then
+            echo "No Xcode 26.x found on this runner image" >&2
+            ls -d /Applications/Xcode_*.app
+            exit 1
+          fi
+          echo "Selecting $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Pearcleaner.xcodeproj \
+            -scheme "Pearcleaner Release"
+
+      - name: Build (signing disabled)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Pearcleaner.xcodeproj \
+            -scheme "Pearcleaner Release" \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Locate, ad-hoc sign, and package .dmg
+        run: |
+          set -euo pipefail
+          APP=$(find build/Build/Products -maxdepth 2 -name "Pearcleaner.app" -type d | head -n1)
+          if [ -z "$APP" ]; then echo "Pearcleaner.app not found" >&2; find build/Build/Products -maxdepth 2; exit 1; fi
+          echo "Built app: $APP"
+
+          # arm64 binaries must carry at least an ad-hoc signature to launch.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --verbose=2 "$APP" || true
+
+          STAGE=dmg-stage
+          mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          DMG="Pearcleaner-${VERSION}.dmg"
+          hdiutil create -volname "Pearcleaner" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pearcleaner-${{ env.VERSION }}-dmg
+          path: ${{ env.DMG }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" "$DMG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Pearcleaner $TAG" \
+            --notes "Automated unsigned build of \`main\` (fork with PRs #580, #578, #574 merged).
+
+          **First launch:** this build is not notarized. Right-click the app -> Open, or run:
+          \`\`\`
+          xattr -dr com.apple.quarantine /Applications/Pearcleaner.app
+          \`\`\`
+          The privileged helper and Finder extension may be limited without Developer ID signing."
